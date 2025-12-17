@@ -53,11 +53,7 @@ def apply_scenario(row, score, band, scenario_name, params):
     
     if is_eligible and multiplier > 0:
         
-        # --- NEW: SCORE FINE-TUNING ---
-        # We adjust the multiplier based on how high the score is within the band.
-        # This creates a continuous distribution of limits (143+ variants) instead of just 7 buckets.
-        # Logic: For every point above the band floor, add 0.5% to the limit.
-        
+        # --- SCORE FINE-TUNING ---
         band_floor = config.SCORE_BANDS.get(band, 0)
         score_surplus = max(0, score - band_floor)
         
@@ -78,13 +74,13 @@ def apply_scenario(row, score, band, scenario_name, params):
             raw_limit *= 0.7  
             reasons.append(f"Friction Penalty (> {round(soft_failure*100)}%)")
 
-        # Cap at Global Max (or specific scenario cap if implemented)
+        # Cap at Global Max
         raw_limit = min(raw_limit, config.GLOBAL_MAX_LOAN)
 
-        # --- NEW: ROUNDING TO NEAREST 500 ---
-        # This forces clean numbers like 3500, 4000, 4500...
+        # --- UPDATED: ROUNDING TO NEAREST 1000 ---
+        # This forces clean numbers like 3000, 4000, 5000...
         if raw_limit >= config.GLOBAL_MIN_LOAN:
-             amount = 500 * round(raw_limit / 500)
+             amount = 1000 * round(raw_limit / 1000)
         else:
             amount = 0.0
             reasons.append("Below Min Loan Size")

@@ -1,8 +1,8 @@
-# config.py
+# src/credit_engine/config.py
 
-# Global Constraints
-GLOBAL_MIN_LOAN = 100.0  
-GLOBAL_MAX_LOAN = 50000.0
+# --- UPDATED: GLOBAL LIMITS FOR INITIAL PERIOD ---
+GLOBAL_MIN_LOAN = 2000.0  
+GLOBAL_MAX_LOAN = 20000.0
 
 # Score Components
 WEIGHT_FREQUENCY = 30
@@ -22,7 +22,6 @@ SCENARIOS = {
         'max_failure_rate': 0.15,
         'soft_failure_threshold': 0.10, 
         'soft_dormancy_threshold': 14, 
-        # UPDATED: Changed from Tiered to Continuous to allow variance
         'limit_strategy': 'Continuous', 
         'multipliers': {'A': 0.8, 'B': 0.6, 'C': 0.4, 'D': 0.0} 
     },
@@ -44,7 +43,6 @@ SCENARIOS = {
         'soft_failure_threshold': 0.60, 
         'soft_dormancy_threshold': 60,  
         'limit_strategy': 'Continuous',
-        # Higher multipliers for mass adoption
         'multipliers': {'A': 2.0, 'B': 1.5, 'C': 1.0, 'D': 0.5} 
     }
 }
