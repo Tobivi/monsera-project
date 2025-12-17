@@ -54,7 +54,7 @@ if app_mode == "Single User Simulation":
 
     with col2:
         st.markdown("### 💰 Financial Capacity")
-        median_spend = st.number_input("Median Vend Amount (₦)", min_value=0, value=3000, step=500)
+        median_spend = st.number_input("Median Vend Amount (₦)", min_value=0, value=5000, step=500)
         total_vends = st.number_input("Total Lifetime Vends", min_value=1, value=15)
         # Derived metric for scoring
         avg_monthly = median_spend * (vends_60d / 2) if vends_60d > 0 else 0
@@ -66,7 +66,6 @@ if app_mode == "Single User Simulation":
         unique_devices = st.number_input("Unique Devices Used", min_value=1, max_value=10, value=1)
 
     # Build DataFrame for the Engine
-    # We construct a single-row dataframe with the exact columns expected by scoring.py
     input_data = {
         'Meter No': ['SIMULATED_USER_001'],
         'tenure_days': [tenure_days],
@@ -77,7 +76,7 @@ if app_mode == "Single User Simulation":
         'failure_rate': [failure_rate],
         'volatility': [volatility],
         'unique_devices': [unique_devices],
-        'avg_monthly_spend': [avg_monthly] # Not strictly used in scoring logic shown, but good for completeness
+        'avg_monthly_spend': [avg_monthly]
     }
     
     sim_df = pd.DataFrame(input_data)
@@ -87,41 +86,68 @@ if app_mode == "Single User Simulation":
         result = apply_v0_rules(sim_df).iloc[0]
 
         st.divider()
-        st.subheader("2. Decision Results")
+        st.subheader("2. Decision Dashboard")
         
-        # Display Base Score
-        score_col, band_col = st.columns(2)
-        score_col.metric("Behavior Score (0-100)", f"{result['Score']:.1f}")
-        band_col.metric("Risk Band", result['Band'])
+        # --- Top Level Metrics ---
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Behavior Score", f"{result['Score']:.1f} / 100")
+        m2.metric("Risk Band", result['Band'])
+        m3.metric("Median Capacity", f"₦{median_spend:,.0f}")
 
-        # Display Scenarios Side-by-Side
-        sc_cols = st.columns(3)
+        # --- PREPARE DATA FOR VISUALIZATION ---
         scenarios = config.SCENARIOS.keys()
-
-        for i, sc in enumerate(scenarios):
+        viz_data = []
+        
+        for sc in scenarios:
             decision = result[f"Decision_{sc}"]
             amount = result[f"Amount_{sc}"]
             reason = result[f"Reason_{sc}"]
             
-            with sc_cols[i]:
-                # Dynamic coloring
-                if decision == "APPROVED":
-                    color = "green"
-                    icon = "✅"
-                else:
-                    color = "red"
-                    icon = "❌"
-                
-                st.markdown(f"### {sc}")
-                st.markdown(f"**Decision:** :{color}[{decision} {icon}]")
-                st.metric("Credit Limit", f"₦{amount:,.0f}")
-                
-                if decision == "REJECTED":
-                    st.error(f"**Reason:** {reason}")
-                else:
-                    st.caption(f"Strategy: {config.SCENARIOS[sc]['limit_strategy']}")
+            viz_data.append({
+                "Scenario": sc,
+                "Credit Limit": amount,
+                "Decision": decision,
+                "Reason": reason
+            })
+
+        viz_df = pd.DataFrame(viz_data)
+
+        # --- VISUALIZATION: Limit Comparison ---
+        st.subheader("3. Scenario Impact Analysis")
+        
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            # Bar Chart: Limit by Scenario
+            fig = px.bar(
+                viz_df, 
+                x="Scenario", 
+                y="Credit Limit", 
+                color="Decision",
+                text="Credit Limit",
+                title="Approved Credit Limit by Scenario",
+                color_discrete_map={"APPROVED": "#00CC96", "REJECTED": "#EF553B"},
+                labels={"Credit Limit": "Limit (₦)"}
+            )
+            fig.update_traces(texttemplate='₦%{text:,.0f}', textposition='outside')
+            fig.update_layout(yaxis_range=[0, max(20000, viz_df['Credit Limit'].max() * 1.2)]) # Add headroom
+            st.plotly_chart(fig, use_container_width=True)
+
+        with c2:
+            # Detailed Cards for each Scenario
+            st.markdown("**Scenario Breakdown**")
+            for index, row in viz_df.iterrows():
+                with st.expander(f"{row['Scenario']}", expanded=True):
+                    if row['Decision'] == "APPROVED":
+                        st.success(f"✅ **APPROVED: ₦{row['Credit Limit']:,.0f}**")
+                    else:
+                        st.error(f"❌ **REJECTED**")
+                        st.caption(f"Reason: {row['Reason']}")
 
 
+# ==========================================
+# MODE 2: BATCH UPLOAD (Existing Logic)
+# ==========================================
 elif app_mode == "Batch Upload (CSV)":
     uploaded_file = st.sidebar.file_uploader("Upload Transactions (CSV)", type=['csv'])
 
@@ -134,7 +160,7 @@ elif app_mode == "Batch Upload (CSV)":
                 
             st.success(f"Successfully processed {len(results_df)} unique meters.")
 
-            # --- METRICS & DASHBOARD (Same as before) ---
+            # --- METRICS & DASHBOARD ---
             scenarios = config.SCENARIOS.keys()
             metrics = []
 
@@ -164,6 +190,8 @@ elif app_mode == "Batch Upload (CSV)":
                     st.caption(f"Total Exposure: {metric['Total Exposure']}")
 
             st.subheader("3. Impact Analysis")
+            
+            # Box Plot for Limits
             plot_data = []
             for sc in scenarios:
                 amt_col = f"Amount_{sc}"
@@ -173,7 +201,7 @@ elif app_mode == "Batch Upload (CSV)":
             
             if plot_data:
                 plot_df = pd.DataFrame(plot_data)
-                fig = px.box(plot_df, x="Scenario", y="Credit Limit", color="Scenario", points="all")
+                fig = px.box(plot_df, x="Scenario", y="Credit Limit", color="Scenario", points="all", title="Portfolio Limit Distribution")
                 st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("4. Detailed Data")
