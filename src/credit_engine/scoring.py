@@ -1,104 +1,105 @@
-# src/credit_engine/scoring.py
 import pandas as pd
 import numpy as np
-# CHANGE THIS LINE: Use the full path to import config
-from src.credit_engine import config 
+from src.credit_engine import config
 
-def apply_enhanced_v0_logic(features_df):
+def calculate_score(row):
+    """Calculates the 0-100 Behavior Score"""
+    # A. Frequency Score (0-30)
+    avg_vends_per_month = row['total_success_vends'] / max(1, (row['tenure_days']/30))
+    freq_score = min(config.WEIGHT_FREQUENCY, (avg_vends_per_month / config.REF_HIGH_FREQ_MONTHLY) * config.WEIGHT_FREQUENCY)
+    
+    # B. Consistency Score (0-25)
+    cons_score = max(0, config.WEIGHT_CONSISTENCY * (1 - row['volatility']))
+    
+    # C. Capacity Score (0-25) - Relative to 5000 baseline
+    cap_score = min(config.WEIGHT_CAPACITY, (row['median_vend_amount'] / 5000) * config.WEIGHT_CAPACITY)
+
+    # D. Reliability Score (0-20)
+    rel_score = max(0, config.WEIGHT_RELIABILITY - (row['unique_devices'] - 1) * 10)
+
+    total = freq_score + cons_score + cap_score + rel_score
+    
+    # Determine Band
+    if total >= config.SCORE_BANDS['A']: band = 'A'
+    elif total >= config.SCORE_BANDS['B']: band = 'B'
+    elif total >= config.SCORE_BANDS['C']: band = 'C'
+    else: band = 'D'
+    
+    return round(total, 1), band
+
+def apply_scenario(row, score, band, scenario_name, params):
     """
-    Implements the 3-Step V0 Behavioral Model:
-    1. Hard Gates (Eligibility)
-    2. Behavior Score (0-100)
-    3. Credit Limit Calculation (Base Limit + Caps)
+    Applies specific Gates and Limit Logic for a single scenario.
     """
-    print("Running Enhanced V0 Model...")
+    reasons = []
+    is_eligible = True
+    
+    # 1. Gates
+    if row['vends_60d'] < params['min_vends_60d']:
+        is_eligible = False
+        reasons.append(f"< {params['min_vends_60d']} vends")
+        
+    if row['recency_days'] > params['max_dormancy_days']:
+        is_eligible = False
+        reasons.append(f"> {params['max_dormancy_days']} days dormant")
+        
+    if row['failure_rate'] > params['max_failure_rate']:
+        is_eligible = False
+        reasons.append(f"High Failure Rate ({round(row['failure_rate']*100)}%)")
+
+    # 2. Limit Calculation
+    amount = 0.0
+    
+    if is_eligible and band != 'D':
+        multiplier = params['multipliers'][band]
+        
+        # Continuous Sizing: Limit = Median * Multiplier
+        raw_limit = row['median_vend_amount'] * multiplier
+        
+        # If Tiered (Conservative), clamp it to the Band Cap
+        if params['limit_strategy'] == 'Tiered':
+            band_cap = params['tier_caps'][band]
+            raw_limit = min(raw_limit, band_cap)
+            
+        # Global Constraints
+        if raw_limit < config.GLOBAL_MIN_LOAN:
+            amount = 0.0
+            reasons.append("Below Min Loan Size")
+        else:
+            amount = min(raw_limit, config.GLOBAL_MAX_LOAN)
+            
+    decision = "APPROVED" if amount > 0 else "REJECTED"
+    reason_text = "; ".join(reasons) if reasons else "Eligible"
+    
+    return {
+        f"Decision_{scenario_name}": decision,
+        f"Amount_{scenario_name}": round(amount, 0),
+        f"Reason_{scenario_name}": reason_text
+    }
+
+def apply_v0_rules(features_df):
+    print("Running Multi-Scenario V0 Simulation...")
     results = []
 
     for meter_id, row in features_df.iterrows():
-        # --- 1. HARD GATES ---
-        rejection_reasons = []
-        is_eligible = True
-
-        # Gate: Insufficient History (< 6 vends in last 60 days)
-        if row['vends_60d'] < config.GATE_MIN_VENDS_60_DAYS:
-            is_eligible = False
-            rejection_reasons.append(f"Insufficient history ({row['vends_60d']} vends/60d)")
-
-        # Gate: Dormant Behavior (Last vend > 30 days ago)
-        if row['recency_days'] > config.GATE_MAX_DAYS_DORMANT:
-            is_eligible = False
-            rejection_reasons.append(f"Dormant (Last vend {row['recency_days']} days ago)")
-
-        # --- 2. BEHAVIOR SCORE (0-100) ---
-        # Only calculate score if eligible (or useful for analysis)
-        score = 0
-        band = 'D'
+        # Calculate Base Score (Invariant across scenarios)
+        score, band = calculate_score(row)
         
-        # A. Frequency Score (0-30)
-        # Simple interpolation: 10 vends/month = 30 points
-        avg_vends_per_month = row['total_vends'] / max(1, (row['tenure_days']/30))
-        freq_score = min(config.WEIGHT_FREQUENCY, (avg_vends_per_month / config.REF_HIGH_FREQ_MONTHLY) * config.WEIGHT_FREQUENCY)
-        
-        # B. Consistency Score (0-25)
-        # Inverse of volatility. Lower volatility = Higher score.
-        # If vol > 1.0, score is 0. If vol = 0, score is max.
-        cons_score = max(0, config.WEIGHT_CONSISTENCY * (1 - row['volatility']))
-        
-        # C. Capacity Score (0-25)
-        # Uses Median Vend Amount. Assuming Median > 3000 is "Good" (Example Logic)
-        # Scaled against a reference of 5000 (Adjust based on data reality)
-        cap_score = min(config.WEIGHT_CAPACITY, (row['median_vend_amount'] / 5000) * config.WEIGHT_CAPACITY)
-
-        # D. Reliability Score (0-20)
-        # Penalize for multiple devices (proxy for channel stability)
-        # 1 device = Full points, 3+ devices = 0 points
-        rel_score = max(0, config.WEIGHT_RELIABILITY - (row['unique_devices'] - 1) * 10)
-
-        total_score = freq_score + cons_score + cap_score + rel_score
-        
-        # Determine Band
-        if total_score >= config.SCORE_BANDS['A']['min_score']: band = 'A'
-        elif total_score >= config.SCORE_BANDS['B']['min_score']: band = 'B'
-        elif total_score >= config.SCORE_BANDS['C']['min_score']: band = 'C'
-        else: band = 'D'
-
-        # --- 3. CREDIT LIMIT CALCULATION ---
-        final_limit = 0.0
-        
-        if is_eligible and band != 'D':
-            band_config = config.SCORE_BANDS[band]
-            
-            # Base Limit = min( CapByBand, k * MedianVendAmount )
-            base_limit = min(band_config['cap'], band_config['k'] * row['median_vend_amount'])
-            
-            # Apply Global Min/Max Constraints (User Requirement)
-            # Only approve if calculated limit >= Global Min
-            if base_limit >= config.MIN_LOAN_AMOUNT:
-                final_limit = min(base_limit, config.MAX_LOAN_AMOUNT)
-                decision = "APPROVED"
-                reason = "Eligible"
-            else:
-                decision = "REJECTED"
-                final_limit = 0.0
-                rejection_reasons.append(f"Calculated limit ({base_limit}) below min threshold")
-                reason = "; ".join(rejection_reasons)
-        else:
-            decision = "REJECTED"
-            reason = "; ".join(rejection_reasons) if rejection_reasons else f"Low Score (Band {band})"
-
-        results.append({
+        row_result = {
             'Meter No': meter_id,
-            'Score': round(total_score, 1),
+            'Score': score,
             'Band': band,
-            'Recency (Days)': row['recency_days'],
-            'Vends (60d)': row['vends_60d'],
-            'Median Spend': row['median_vend_amount'],
-            'Decision': decision,
-            'Approved Amount': round(final_limit, 2),
-            'Reason': reason
-        })
+            'Recency': row['recency_days'],
+            'Vends_60d': row['vends_60d'],
+            'Failure_Rate': round(row['failure_rate'], 2),
+            'Median_Spend': row['median_vend_amount']
+        }
+        
+        # Run all 3 Scenarios
+        for name, params in config.SCENARIOS.items():
+            scenario_result = apply_scenario(row, score, band, name, params)
+            row_result.update(scenario_result)
+            
+        results.append(row_result)
 
     return pd.DataFrame(results)
-
-def apply_v0_rules(features_df):
-    return apply_enhanced_v0_logic(features_df)

@@ -1,42 +1,47 @@
-# data_loader.py
 import pandas as pd
 import numpy as np
 
 def load_and_clean_data(filepath):
     """
-    Loads raw vending data and performs basic cleaning.
+    Loads consolidated transaction data.
+    IMPORTANT: Retains FAILED transactions to calculate failure rates.
     """
     print(f"Loading data from {filepath}...")
     
-    # Load CSV
-    # Note: 'Meter No' is often read as float (scientific notation) by default, 
-    # so we force it to string or object if possible, but cleaning is usually needed after.
     df = pd.read_csv(filepath)
 
-    # 1. Parse Dates [cite: 35]
-    # 'Entry Date' seems to be the transaction time
-    df['Entry Date'] = pd.to_datetime(df['Entry Date'], errors='coerce')
+    # 1. Standardize Column Names
+    column_mapping = {
+        'User_ID': 'Meter No',
+        'Transaction_Date': 'Entry Date',
+        'Access_Source': 'User Agent',
+        'Status': 'Status'
+    }
+    df = df.rename(columns=column_mapping)
+
+    # 2. Mark Success/Failure (Do not drop rows yet)
+    # We need failures to calculate "Friction Risk"
+    valid_statuses = ['SUCCESS', 'SUCCESSFUL', 'COMPLETED']
     
-    # Drop rows with invalid dates
+    # Handle case sensitivity and whitespace
+    if 'Status' in df.columns:
+        df['is_successful'] = df['Status'].astype(str).str.upper().str.strip().isin(valid_statuses)
+    else:
+        # If no status column, assume all are valid (fallback)
+        df['is_successful'] = True
+
+    # 3. Parse Dates
+    df['Entry Date'] = pd.to_datetime(df['Entry Date'], errors='coerce')
     df = df.dropna(subset=['Entry Date'])
 
-    # 2. Clean Amounts [cite: 36]
-    # Ensure Amount is numeric
+    # 4. Clean Amounts
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
 
-    # 3. Clean Meter Numbers
-    # The CSV shows Meter No as '1.9521E+11'. We need to standardize this.
-    def clean_meter_id(x):
-        try:
-            # Convert scientific notation float to full integer string
-            return str(int(float(x)))
-        except (ValueError, TypeError):
-            return str(x)
+    # 5. Clean ID
+    df['Meter No'] = df['Meter No'].astype(str).str.strip()
 
-    df['Meter No'] = df['Meter No'].apply(clean_meter_id)
-
-    # Sort by date for accurate timeline calculations
+    # Sort by date
     df = df.sort_values(by='Entry Date')
 
-    print(f"Data loaded successfully: {len(df)} transactions found.")
+    print(f"Data loaded successfully: {len(df)} total transactions (Success + Failure).")
     return df

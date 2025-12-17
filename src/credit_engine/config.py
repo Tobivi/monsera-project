@@ -1,39 +1,50 @@
-# my-credit-project/src/credit_engine/config.py
+# config.py
 
-# --- EXISTING CONFIG (Preserved) ---
-MIN_TENURE_DAYS = 30
-MIN_AVG_MONTHLY_SPEND = 3000.0
-MAX_SPEND_VOLATILITY = 0.5
-MIN_VEND_FREQUENCY = 3 
-STARTING_CREDIT_LIMIT = 1000.0 
-ZERO_CREDIT_LIMIT = 0.0
+# Global Constraints (Applied to ALL Scenarios)
+GLOBAL_MIN_LOAN = 2000.0
+GLOBAL_MAX_LOAN = 20000.0
 
-# --- NEW V0 MODEL CONFIG ---
-
-# Global Limits (from your specific instruction)
-MIN_LOAN_AMOUNT = 2000.0
-MAX_LOAN_AMOUNT = 20000.0
-
-# Step 1: Hard Gates
-GATE_MIN_VENDS_60_DAYS = 6      # Insufficient history
-GATE_MAX_DAYS_DORMANT = 30      # Dormant behavior
-
-# Step 2: Scoring Weights (Max Points)
+# Score Components (Same logic across scenarios, just different eligibility)
 WEIGHT_FREQUENCY = 30
 WEIGHT_CONSISTENCY = 25
 WEIGHT_CAPACITY = 25
 WEIGHT_RELIABILITY = 20
-
-# Scoring Reference Values (for normalization)
-# e.g., 10 vends/month gets full points for frequency
 REF_HIGH_FREQ_MONTHLY = 10      
-REF_MAX_VOLATILITY = 1.0        # Lower is better
+REF_MAX_VOLATILITY = 1.0
 
-# Step 3: Score Bands & Caps
-# Format: 'Band': {'min_score': X, 'cap': Y, 'k_multiplier': Z}
+# --- SCENARIO DEFINITIONS ---
+SCENARIOS = {
+    'A_Conservative': {
+        # The Original "Tight" Rules
+        'min_vends_60d': 6,
+        'max_dormancy_days': 30,
+        'max_failure_rate': 0.20,   # Strict on failures
+        'limit_strategy': 'Tiered', # Fixed Caps
+        'tier_caps': {'A': 10000, 'B': 7500, 'C': 5000, 'D': 0},
+        'multipliers': {'A': 1.0, 'B': 0.8, 'C': 0.5, 'D': 0}
+    },
+    'B_Moderate': {
+        # The "Learning" Rules (Recommended)
+        'min_vends_60d': 4,         # Relaxed
+        'max_dormancy_days': 45,    # Relaxed
+        'max_failure_rate': 0.35,   # Tolerates more retry noise
+        'limit_strategy': 'Continuous', # No hard band caps, just multipliers
+        # Multipliers determine % of Median Spend we advance
+        'multipliers': {'A': 1.0, 'B': 0.75, 'C': 0.50, 'D': 0} 
+    },
+    'C_Aggressive': {
+        # The "Growth" Rules (Maximum Approval)
+        'min_vends_60d': 3,         # Very Relaxed
+        'max_dormancy_days': 60,    # Very Relaxed
+        'max_failure_rate': 0.50,   # High friction tolerance
+        'limit_strategy': 'Continuous',
+        # Aggressive multipliers (can lend MORE than median for top users)
+        'multipliers': {'A': 1.2, 'B': 1.0, 'C': 0.75, 'D': 0} 
+    }
+}
+
 SCORE_BANDS = {
-    'A': {'min_score': 80, 'cap': 10000, 'k': 1.0},
-    'B': {'min_score': 65, 'cap': 7500,  'k': 0.8},
-    'C': {'min_score': 50, 'cap': 5000,  'k': 0.5},
-    'D': {'min_score': 0,  'cap': 0,     'k': 0.0}
+    'A': 80,
+    'B': 65,
+    'C': 50
 }
