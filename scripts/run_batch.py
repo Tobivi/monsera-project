@@ -19,13 +19,15 @@ def main():
         scorecard = apply_v0_rules(features_df)
 
         print("\n--- COMPARISON (SAMPLE) ---")
+        # Updated columns to match new Layman naming in config.py
         cols = ['Meter No', 'Score', 'Median_Spend', 
-                'Decision_A_Conservative', 'Amount_A_Conservative',
-                'Decision_B_Moderate', 'Amount_B_Moderate',
-                'Decision_C_Aggressive', 'Amount_C_Aggressive']
+                'Decision_1_Conservative_Bank', 'Amount_1_Conservative_Bank',
+                'Decision_2_Balanced_Growth', 'Amount_2_Balanced_Growth',
+                'Decision_3_Mass_Adoption', 'Amount_3_Mass_Adoption']
         
-        # Handle case where fewer cols exist if config changed, but usually fine
-        print(scorecard[cols].head())
+        # Safe print: check if cols exist first
+        available_cols = [c for c in cols if c in scorecard.columns]
+        print(scorecard[available_cols].head())
 
         output_filename = 'monsera_v0_scenario_analysis.csv'
         scorecard.to_csv(output_filename, index=False)

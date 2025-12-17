@@ -29,36 +29,51 @@ def calculate_score(row):
 
 def apply_scenario(row, score, band, scenario_name, params):
     """
-    Applies specific Gates and Limit Logic for a single scenario.
+    Applies Gates (Hard Rejection) and Penalties (Soft Rejection/Limit Reduction).
     """
     reasons = []
     is_eligible = True
     
-    # 1. Gates
+    # --- 1. HARD GATES (Must pass these to get anything) ---
     if row['vends_60d'] < params['min_vends_60d']:
         is_eligible = False
-        reasons.append(f"< {params['min_vends_60d']} vends")
+        reasons.append(f"Not enough history (< {params['min_vends_60d']})")
         
     if row['recency_days'] > params['max_dormancy_days']:
         is_eligible = False
-        reasons.append(f"> {params['max_dormancy_days']} days dormant")
+        reasons.append(f"Too dormant (> {params['max_dormancy_days']} days)")
         
     if row['failure_rate'] > params['max_failure_rate']:
         is_eligible = False
-        reasons.append(f"High Failure Rate ({round(row['failure_rate']*100)}%)")
+        reasons.append(f"Failure rate too high (> {round(params['max_failure_rate']*100)}%)")
 
-    # 2. Limit Calculation
+    # --- 2. LIMIT CALCULATION & SOFT PENALTIES ---
     amount = 0.0
     
-    if is_eligible and band != 'D':
-        multiplier = params['multipliers'][band]
+    # Allow Band D in aggressive scenarios if multiplier > 0
+    multiplier = params['multipliers'].get(band, 0.0)
+    
+    if is_eligible and multiplier > 0:
         
         # Continuous Sizing: Limit = Median * Multiplier
         raw_limit = row['median_vend_amount'] * multiplier
         
+        # --- SOFT PENALTIES (Reduce limit instead of rejecting) ---
+        # Penalty 1: Dormancy Check
+        soft_dormancy = params.get('soft_dormancy_threshold', 30)
+        if row['recency_days'] > soft_dormancy:
+            raw_limit *= 0.6  # 40% cut
+            reasons.append(f"Dormancy Penalty (> {soft_dormancy}d)")
+            
+        # Penalty 2: Failure Rate Check
+        soft_failure = params.get('soft_failure_threshold', 0.2)
+        if row['failure_rate'] > soft_failure:
+            raw_limit *= 0.7  # 30% cut
+            reasons.append(f"Friction Penalty (> {round(soft_failure*100)}%)")
+
         # If Tiered (Conservative), clamp it to the Band Cap
         if params['limit_strategy'] == 'Tiered':
-            band_cap = params['tier_caps'][band]
+            band_cap = params['tier_caps'].get(band, 0)
             raw_limit = min(raw_limit, band_cap)
             
         # Global Constraints
@@ -69,7 +84,7 @@ def apply_scenario(row, score, band, scenario_name, params):
             amount = min(raw_limit, config.GLOBAL_MAX_LOAN)
             
     decision = "APPROVED" if amount > 0 else "REJECTED"
-    reason_text = "; ".join(reasons) if reasons else "Eligible"
+    reason_text = "; ".join(reasons) if reasons else "Clean Approval"
     
     return {
         f"Decision_{scenario_name}": decision,
@@ -95,7 +110,7 @@ def apply_v0_rules(features_df):
             'Median_Spend': row['median_vend_amount']
         }
         
-        # Run all 3 Scenarios
+        # Run all Scenarios
         for name, params in config.SCENARIOS.items():
             scenario_result = apply_scenario(row, score, band, name, params)
             row_result.update(scenario_result)
