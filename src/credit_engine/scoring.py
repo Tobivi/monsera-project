@@ -29,12 +29,12 @@ def calculate_score(row):
 
 def apply_scenario(row, score, band, scenario_name, params):
     """
-    Applies Gates (Hard Rejection) and Penalties (Soft Rejection/Limit Reduction).
+    Applies Gates and calculates Limit with Score-Based Interpolation.
     """
     reasons = []
     is_eligible = True
     
-    # --- 1. HARD GATES (Must pass these to get anything) ---
+    # --- 1. HARD GATES ---
     if row['vends_60d'] < params['min_vends_60d']:
         is_eligible = False
         reasons.append(f"Not enough history (< {params['min_vends_60d']})")
@@ -47,41 +47,47 @@ def apply_scenario(row, score, band, scenario_name, params):
         is_eligible = False
         reasons.append(f"Failure rate too high (> {round(params['max_failure_rate']*100)}%)")
 
-    # --- 2. LIMIT CALCULATION & SOFT PENALTIES ---
+    # --- 2. LIMIT CALCULATION ---
     amount = 0.0
-    
-    # Allow Band D in aggressive scenarios if multiplier > 0
     multiplier = params['multipliers'].get(band, 0.0)
     
     if is_eligible and multiplier > 0:
         
-        # Continuous Sizing: Limit = Median * Multiplier
-        raw_limit = row['median_vend_amount'] * multiplier
+        # --- NEW: SCORE FINE-TUNING ---
+        # We adjust the multiplier based on how high the score is within the band.
+        # This creates a continuous distribution of limits (143+ variants) instead of just 7 buckets.
+        # Logic: For every point above the band floor, add 0.5% to the limit.
         
-        # --- SOFT PENALTIES (Reduce limit instead of rejecting) ---
-        # Penalty 1: Dormancy Check
+        band_floor = config.SCORE_BANDS.get(band, 0)
+        score_surplus = max(0, score - band_floor)
+        
+        # Fine-tune factor: 1.0 (base) + extra boost
+        fine_tune_factor = 1 + (score_surplus * 0.005) # 0.5% boost per point
+        
+        # Continuous Sizing
+        raw_limit = row['median_vend_amount'] * multiplier * fine_tune_factor
+        
+        # --- SOFT PENALTIES ---
         soft_dormancy = params.get('soft_dormancy_threshold', 30)
         if row['recency_days'] > soft_dormancy:
-            raw_limit *= 0.6  # 40% cut
+            raw_limit *= 0.6  
             reasons.append(f"Dormancy Penalty (> {soft_dormancy}d)")
             
-        # Penalty 2: Failure Rate Check
         soft_failure = params.get('soft_failure_threshold', 0.2)
         if row['failure_rate'] > soft_failure:
-            raw_limit *= 0.7  # 30% cut
+            raw_limit *= 0.7  
             reasons.append(f"Friction Penalty (> {round(soft_failure*100)}%)")
 
-        # If Tiered (Conservative), clamp it to the Band Cap
-        if params['limit_strategy'] == 'Tiered':
-            band_cap = params['tier_caps'].get(band, 0)
-            raw_limit = min(raw_limit, band_cap)
-            
-        # Global Constraints
-        if raw_limit < config.GLOBAL_MIN_LOAN:
+        # Cap at Global Max (or specific scenario cap if implemented)
+        raw_limit = min(raw_limit, config.GLOBAL_MAX_LOAN)
+
+        # --- NEW: ROUNDING TO NEAREST 500 ---
+        # This forces clean numbers like 3500, 4000, 4500...
+        if raw_limit >= config.GLOBAL_MIN_LOAN:
+             amount = 500 * round(raw_limit / 500)
+        else:
             amount = 0.0
             reasons.append("Below Min Loan Size")
-        else:
-            amount = min(raw_limit, config.GLOBAL_MAX_LOAN)
             
     decision = "APPROVED" if amount > 0 else "REJECTED"
     reason_text = "; ".join(reasons) if reasons else "Clean Approval"
