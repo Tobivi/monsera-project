@@ -1,6 +1,7 @@
-# src/credit_engine/config.py
+# config.py
 
-# --- UPDATED: GLOBAL LIMITS FOR INITIAL PERIOD ---
+# Global Constraints
+# UPDATED: Adjusted min and max to 2k and 20k as requested
 GLOBAL_MIN_LOAN = 2000.0  
 GLOBAL_MAX_LOAN = 20000.0
 
