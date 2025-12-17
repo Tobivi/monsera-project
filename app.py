@@ -17,146 +17,174 @@ st.set_page_config(page_title="Monsera V0 Credit Demo", layout="wide")
 
 st.title("⚡ Monsera V0 Credit Engine")
 st.markdown("""
-This dashboard simulates the **V0 Behavioral Model** across three risk scenarios.
-Upload transaction logs to see how moving from 'Conservative' to 'Aggressive' impacts approval rates and credit limits.
+**Hybrid Demo Mode:** Simulate a single user manually OR upload a batch file to test the portfolio.
 """)
 
-# --- SIDEBAR: CONFIG & UPLOAD ---
-st.sidebar.header("1. Input Data")
-uploaded_file = st.sidebar.file_uploader("Upload Transactions (CSV)", type=['csv'])
+# --- SIDEBAR: MODE SELECTION ---
+st.sidebar.header("Configuration")
+app_mode = st.sidebar.radio("Select Mode:", ["Single User Simulation", "Batch Upload (CSV)"])
 
 st.sidebar.markdown("---")
-st.sidebar.header("Scenario Definitions")
+st.sidebar.header("Scenario Rules")
 
 def display_scenario_params(name, params):
     st.sidebar.subheader(f"{name}")
-    st.sidebar.caption(f"Min Vends (60d): **{params['min_vends_60d']}**")
+    st.sidebar.caption(f"Min Vends: **{params['min_vends_60d']}**")
     st.sidebar.caption(f"Max Dormancy: **{params['max_dormancy_days']} days**")
     st.sidebar.caption(f"Limit Strategy: **{params['limit_strategy']}**")
 
 for name, params in config.SCENARIOS.items():
     display_scenario_params(name, params)
 
-# --- MAIN LOGIC ---
-if uploaded_file is not None:
-    try:
-        with st.spinner('Running V0 Pipeline...'):
-            # 1. Load Data
-            # Streamlit uploads are file-like objects, which pd.read_csv accepts directly
-            raw_df = load_and_clean_data(uploaded_file)
-            
-            # 2. Transform
-            features_df = calculate_features(raw_df)
-            
-            # 3. Score
-            results_df = apply_v0_rules(features_df)
-            
-        st.success(f"Successfully processed {len(results_df)} unique meters.")
+# ==========================================
+# MODE 1: SINGLE USER SIMULATION
+# ==========================================
+if app_mode == "Single User Simulation":
+    st.subheader("1. Simulation Inputs")
+    st.info("Adjust the sliders below to simulate a customer profile and see real-time decisions.")
 
-        # --- METRICS CALCULATION ---
+    # Create 3 columns for inputs
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("### 📅 History & Activity")
+        tenure_days = st.number_input("Total Tenure (Days)", min_value=0, value=90, step=10, help="Days since first transaction")
+        vends_60d = st.slider("Vends in Last 60 Days", 0, 30, 5, help="Key eligibility metric")
+        recency_days = st.slider("Days Since Last Vend", 0, 90, 10, help="Dormancy check")
+
+    with col2:
+        st.markdown("### 💰 Financial Capacity")
+        median_spend = st.number_input("Median Vend Amount (₦)", min_value=0, value=3000, step=500)
+        total_vends = st.number_input("Total Lifetime Vends", min_value=1, value=15)
+        # Derived metric for scoring
+        avg_monthly = median_spend * (vends_60d / 2) if vends_60d > 0 else 0
+
+    with col3:
+        st.markdown("### ⚠️ Risk & Stability")
+        failure_rate = st.slider("Failure Rate (%)", 0.0, 1.0, 0.1, step=0.05)
+        volatility = st.slider("Volatility Score", 0.0, 2.0, 0.3, help="0.0 = Consistent, 1.0+ = Erratic")
+        unique_devices = st.number_input("Unique Devices Used", min_value=1, max_value=10, value=1)
+
+    # Build DataFrame for the Engine
+    # We construct a single-row dataframe with the exact columns expected by scoring.py
+    input_data = {
+        'Meter No': ['SIMULATED_USER_001'],
+        'tenure_days': [tenure_days],
+        'vends_60d': [vends_60d],
+        'recency_days': [recency_days],
+        'median_vend_amount': [median_spend],
+        'total_success_vends': [total_vends],
+        'failure_rate': [failure_rate],
+        'volatility': [volatility],
+        'unique_devices': [unique_devices],
+        'avg_monthly_spend': [avg_monthly] # Not strictly used in scoring logic shown, but good for completeness
+    }
+    
+    sim_df = pd.DataFrame(input_data)
+
+    if st.button("Run Simulation", type="primary"):
+        # Run Scoring
+        result = apply_v0_rules(sim_df).iloc[0]
+
+        st.divider()
+        st.subheader("2. Decision Results")
+        
+        # Display Base Score
+        score_col, band_col = st.columns(2)
+        score_col.metric("Behavior Score (0-100)", f"{result['Score']:.1f}")
+        band_col.metric("Risk Band", result['Band'])
+
+        # Display Scenarios Side-by-Side
+        sc_cols = st.columns(3)
         scenarios = config.SCENARIOS.keys()
-        metrics = []
 
-        for sc in scenarios:
-            decision_col = f"Decision_{sc}"
-            amount_col = f"Amount_{sc}"
+        for i, sc in enumerate(scenarios):
+            decision = result[f"Decision_{sc}"]
+            amount = result[f"Amount_{sc}"]
+            reason = result[f"Reason_{sc}"]
             
-            approved = results_df[results_df[decision_col] == 'APPROVED']
-            approval_rate = (len(approved) / len(results_df)) * 100
-            avg_limit = approved[amount_col].mean() if not approved.empty else 0
-            total_exposure = approved[amount_col].sum()
+            with sc_cols[i]:
+                # Dynamic coloring
+                if decision == "APPROVED":
+                    color = "green"
+                    icon = "✅"
+                else:
+                    color = "red"
+                    icon = "❌"
+                
+                st.markdown(f"### {sc}")
+                st.markdown(f"**Decision:** :{color}[{decision} {icon}]")
+                st.metric("Credit Limit", f"₦{amount:,.0f}")
+                
+                if decision == "REJECTED":
+                    st.error(f"**Reason:** {reason}")
+                else:
+                    st.caption(f"Strategy: {config.SCENARIOS[sc]['limit_strategy']}")
+
+
+elif app_mode == "Batch Upload (CSV)":
+    uploaded_file = st.sidebar.file_uploader("Upload Transactions (CSV)", type=['csv'])
+
+    if uploaded_file is not None:
+        try:
+            with st.spinner('Running V0 Pipeline...'):
+                raw_df = load_and_clean_data(uploaded_file)
+                features_df = calculate_features(raw_df)
+                results_df = apply_v0_rules(features_df)
+                
+            st.success(f"Successfully processed {len(results_df)} unique meters.")
+
+            # --- METRICS & DASHBOARD (Same as before) ---
+            scenarios = config.SCENARIOS.keys()
+            metrics = []
+
+            for sc in scenarios:
+                decision_col = f"Decision_{sc}"
+                amount_col = f"Amount_{sc}"
+                
+                approved = results_df[results_df[decision_col] == 'APPROVED']
+                approval_rate = (len(approved) / len(results_df)) * 100 if len(results_df) > 0 else 0
+                avg_limit = approved[amount_col].mean() if not approved.empty else 0
+                total_exposure = approved[amount_col].sum()
+                
+                metrics.append({
+                    "Scenario": sc,
+                    "Approval Rate": f"{approval_rate:.1f}%",
+                    "Avg Limit": f"₦{avg_limit:,.0f}",
+                    "Total Exposure": f"₦{total_exposure:,.0f}",
+                    "Count": len(approved)
+                })
+
+            st.subheader("2. Scenario Comparison")
+            cols = st.columns(3)
+            for i, metric in enumerate(metrics):
+                with cols[i]:
+                    st.metric(label=f"{metric['Scenario']} Rate", value=metric['Approval Rate'], delta=f"{metric['Count']} Users")
+                    st.caption(f"Avg Limit: {metric['Avg Limit']}")
+                    st.caption(f"Total Exposure: {metric['Total Exposure']}")
+
+            st.subheader("3. Impact Analysis")
+            plot_data = []
+            for sc in scenarios:
+                amt_col = f"Amount_{sc}"
+                temp = results_df[results_df[amt_col] > 0][amt_col]
+                for val in temp:
+                    plot_data.append({'Scenario': sc, 'Credit Limit': val})
             
-            metrics.append({
-                "Scenario": sc,
-                "Approval Rate": f"{approval_rate:.1f}%",
-                "Avg Limit": f"₦{avg_limit:,.0f}",
-                "Total Exposure": f"₦{total_exposure:,.0f}",
-                "Count": len(approved)
-            })
-
-        # --- DASHBOARD ROW 1: KPI CARDS ---
-        st.subheader("2. Scenario Comparison")
-        cols = st.columns(3)
-        
-        for i, metric in enumerate(metrics):
-            with cols[i]:
-                st.metric(
-                    label=f"{metric['Scenario']} Approval Rate",
-                    value=metric['Approval Rate'],
-                    delta=f"{metric['Count']} Users"
-                )
-                st.caption(f"Avg Limit: {metric['Avg Limit']}")
-                st.caption(f"Total Exposure: {metric['Total Exposure']}")
-
-        # --- DASHBOARD ROW 2: VISUALIZATION ---
-        st.subheader("3. Impact Analysis")
-        
-        # Prepare data for plotting
-        plot_data = []
-        for sc in scenarios:
-            amt_col = f"Amount_{sc}"
-            temp = results_df[results_df[amt_col] > 0][amt_col]
-            for val in temp:
-                plot_data.append({'Scenario': sc, 'Credit Limit': val})
-        
-        plot_df = pd.DataFrame(plot_data)
-        
-        if not plot_df.empty:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Credit Limit Distribution (Box Plot)**")
-                fig = px.box(plot_df, x="Scenario", y="Credit Limit", color="Scenario", 
-                             points="all", title="Spread of Approved Amounts")
+            if plot_data:
+                plot_df = pd.DataFrame(plot_data)
+                fig = px.box(plot_df, x="Scenario", y="Credit Limit", color="Scenario", points="all")
                 st.plotly_chart(fig, use_container_width=True)
-            
-            with c2:
-                st.markdown("**Approval Count by Band**")
-                # Group by Band and Decision for the 'Moderate' Scenario as a representative
-                viz_df = results_df.groupby(['Band', 'Decision_B_Moderate']).size().reset_index(name='Count')
-                fig2 = px.bar(viz_df, x="Band", y="Count", color="Decision_B_Moderate", 
-                              title="Risk Bands vs Decisions (Moderate Scenario)",
-                              color_discrete_map={"APPROVED": "#00CC96", "REJECTED": "#EF553B"})
-                st.plotly_chart(fig2, use_container_width=True)
 
-        # --- DASHBOARD ROW 3: DETAILED DATA ---
-        st.subheader("4. Customer Deep Dive")
-        
-        # Filter Options
-        filter_scenario = st.selectbox("Select Scenario View:", list(scenarios), index=1)
-        decision_col = f"Decision_{filter_scenario}"
-        amount_col = f"Amount_{filter_scenario}"
-        reason_col = f"Reason_{filter_scenario}"
-        
-        show_only_approved = st.checkbox("Show Only Approved", value=True)
-        
-        display_cols = ['Meter No', 'Score', 'Band', 'Median_Spend', 'Failure_Rate', decision_col, amount_col, reason_col]
-        
-        view_df = results_df[display_cols].copy()
-        if show_only_approved:
-            view_df = view_df[view_df[decision_col] == 'APPROVED']
-            
-        st.dataframe(view_df.style.format({
-            'Score': "{:.1f}", 
-            'Median_Spend': "₦{:.0f}",
-            amount_col: "₦{:.0f}",
-            'Failure_Rate': "{:.1%}"
-        }), use_container_width=True)
+            st.subheader("4. Detailed Data")
+            st.dataframe(results_df)
 
-        # --- DOWNLOAD ---
-        csv = results_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Download Full Analysis CSV",
-            csv,
-            "monsera_v0_scenario_analysis.csv",
-            "text/csv",
-            key='download-csv'
-        )
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Results", csv, "monsera_results.csv", "text/csv")
 
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
-        # Print detailed error for debugging
-        import traceback
-        st.text(traceback.format_exc())
-
-else:
-    st.info("👈 Please upload your 'consolidated_transactions.csv' file in the sidebar to begin.")
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            import traceback
+            st.text(traceback.format_exc())
+    else:
+        st.info("👈 Please upload 'consolidated_transactions.csv' to begin batch analysis.")
