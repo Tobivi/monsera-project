@@ -43,6 +43,9 @@ if app_mode == "Single User Simulation":
     st.subheader("1. Simulation Inputs")
     st.info("Adjust the sliders below to simulate a customer profile and see real-time decisions.")
 
+    # --- NEW: Meter ID Input ---
+    meter_id = st.text_input("Meter ID (Label)", value="TEST_USER_001", help="Give this simulation a name for your CSV export.")
+
     # Create 3 columns for inputs
     col1, col2, col3 = st.columns(3)
 
@@ -67,7 +70,7 @@ if app_mode == "Single User Simulation":
 
     # Build DataFrame for the Engine
     input_data = {
-        'Meter No': ['SIMULATED_USER_001'],
+        'Meter No': [meter_id],  # Uses the custom ID now
         'tenure_days': [tenure_days],
         'vends_60d': [vends_60d],
         'recency_days': [recency_days],
@@ -83,7 +86,8 @@ if app_mode == "Single User Simulation":
 
     if st.button("Run Simulation", type="primary"):
         # Run Scoring
-        result = apply_v0_rules(sim_df).iloc[0]
+        results_df = apply_v0_rules(sim_df) # Keep full DF for export
+        result = results_df.iloc[0]         # Extract Series for display
 
         st.divider()
         st.subheader("2. Decision Dashboard")
@@ -125,7 +129,7 @@ if app_mode == "Single User Simulation":
                 y="Credit Limit", 
                 color="Decision",
                 text="Credit Limit",
-                title="Approved Credit Limit by Scenario",
+                title=f"Approved Credit Limit for {meter_id}",
                 color_discrete_map={"APPROVED": "#00CC96", "REJECTED": "#EF553B"},
                 labels={"Credit Limit": "Limit (₦)"}
             )
@@ -143,6 +147,16 @@ if app_mode == "Single User Simulation":
                     else:
                         st.error(f"❌ **REJECTED**")
                         st.caption(f"Reason: {row['Reason']}")
+        
+        # --- NEW: Download Button ---
+        st.divider()
+        csv = results_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Simulation Result (CSV)",
+            data=csv,
+            file_name=f"sim_result_{meter_id}.csv",
+            mime="text/csv"
+        )
 
 
 # ==========================================
