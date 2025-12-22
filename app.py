@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import sys
 import os
-from datetime import datetime
 
 # Ensure we can import from src
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -12,113 +12,221 @@ from src.etl.transformer import calculate_features
 from src.credit_engine.scoring import apply_v0_rules
 from src.credit_engine import config
 
-st.set_page_config(page_title="Monsera V0 Engine", page_icon="⚡", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Monsera V0 Credit Demo", layout="wide")
 
-# --- HELPER: LOAD DATA ---
-@st.cache_data
-def load_demo_database():
-    paths = ["data/consolidated_transactions.csv", "demo/data/consolidated_transactions.csv"]
-    for path in paths:
-        full_path = os.path.join(os.path.dirname(__file__), path)
-        if os.path.exists(full_path):
-            df = pd.read_csv(full_path)
-            if "Transaction_Date" in df.columns:
-                df['Transaction_Date'] = pd.to_datetime(df['Transaction_Date'])
-            return df
-    return None
-
-demo_db = load_demo_database()
-
-# --- SIDEBAR: DATA INSPECTOR & TIME TRAVEL ---
-st.sidebar.title("🛠️ Data Inspector")
-
-if demo_db is not None:
-    # 1. SHOW DISCOS FOUND
-    st.sidebar.markdown("### 🔍 DisCos Found")
-    if 'Service_Provider' in demo_db.columns:
-        discos = demo_db['Service_Provider'].value_counts()
-        st.sidebar.dataframe(discos, use_container_width=True)
-    else:
-        st.sidebar.error("No 'Service_Provider' column found.")
-
-    # 2. TIME TRAVEL SLIDER (The Fix for Eligibility)
-    st.sidebar.markdown("### ⏳ Time Travel")
-    st.sidebar.info("Adjust this date to test users from past months.")
-    
-    min_date = demo_db['Transaction_Date'].min().date()
-    max_date = demo_db['Transaction_Date'].max().date()
-    
-    # Default to the *start* of the dataset to catch the bulk of users? 
-    # No, better to default to max, but let user slide back.
-    sim_date = st.sidebar.date_input("Simulation 'Today' Date", value=max_date, min_value=min_date, max_value=max_date)
-else:
-    st.sidebar.warning("Load data to use Inspector.")
-    sim_date = datetime.now().date()
-
-# --- MAIN APP ---
 st.title("⚡ Monsera V0 Credit Engine")
+st.markdown("""
+**Hybrid Demo Mode:** Simulate a single user manually OR upload a batch file to test the portfolio.
+""")
 
-# --- INPUT SECTION ---
-st.subheader("1. Select Customer")
+# --- SIDEBAR: MODE SELECTION ---
+st.sidebar.header("Configuration")
+app_mode = st.sidebar.radio("Select Mode:", ["Single User Simulation", "Batch Upload (CSV)"])
 
-if demo_db is not None:
-    # Filter by DisCo first (To solve the "Eko Only" view)
-    all_discos = demo_db['Service_Provider'].unique().tolist()
-    selected_filter_disco = st.selectbox("Filter by DisCo", ["All"] + all_discos)
-    
-    if selected_filter_disco != "All":
-        filtered_users = demo_db[demo_db['Service_Provider'] == selected_filter_disco]['User_ID'].unique()
-    else:
-        filtered_users = demo_db['User_ID'].unique()
-        
-    selected_meter = st.selectbox("Select Meter / User ID", filtered_users)
-    
-    # Process Selected User
-    user_txns = demo_db[demo_db['User_ID'] == selected_meter].sort_values('Transaction_Date', ascending=False)
-    
-    # PREPARE FOR CALCULATIONS
-    # Filter out "Future" transactions based on Time Travel Slider
-    user_txns_sim = user_txns[user_txns['Transaction_Date'] <= pd.to_datetime(sim_date)]
-    
-    if user_txns_sim.empty:
-        st.error(f"❌ This user has no transactions before {sim_date}. Try moving the date slider forward.")
-    else:
-        # Prepare DF for Transformer
-        prep_df = user_txns_sim.rename(columns={
-            'User_ID': 'Meter No', 
-            'Transaction_Date': 'Entry Date',
-            'Access_Source': 'User Agent'
-        })
-        prep_df['is_successful'] = prep_df['Status'].str.upper().isin(['SUCCESS', 'COMPLETED', 'SUCCESSFUL'])
-        
-        # CALCULATE FEATURES (PASSING THE SIM DATE)
-        sim_data = calculate_features(prep_df, reference_date=sim_date)
-        
-        # RUN SCORING
-        results_df = apply_v0_rules(sim_data)
-        result = results_df.iloc[0]
+st.sidebar.markdown("---")
+st.sidebar.header("Scenario Rules")
 
-        # --- DISPLAY RESULTS ---
+def display_scenario_params(name, params):
+    st.sidebar.subheader(f"{name}")
+    st.sidebar.caption(f"Min Vends: **{params['min_vends_60d']}**")
+    st.sidebar.caption(f"Max Dormancy: **{params['max_dormancy_days']} days**")
+    st.sidebar.caption(f"Limit Strategy: **{params['limit_strategy']}**")
+
+for name, params in config.SCENARIOS.items():
+    display_scenario_params(name, params)
+
+# ==========================================
+# MODE 1: SINGLE USER SIMULATION
+# ==========================================
+if app_mode == "Single User Simulation":
+    st.subheader("1. Simulation Inputs")
+    st.info("Adjust the sliders below to simulate a customer profile and see real-time decisions.")
+
+    # --- NEW: Meter ID Input ---
+    meter_id = st.text_input("Meter ID (Label)", value="TEST_USER_001", help="Give this simulation a name for your CSV export.")
+
+    # Create 3 columns for inputs
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("### 📅 History & Activity")
+        tenure_days = st.number_input("Total Tenure (Days)", min_value=0, value=90, step=10, help="Days since first transaction")
+        vends_60d = st.slider("Vends in Last 60 Days", 0, 30, 5, help="Key eligibility metric")
+        recency_days = st.slider("Days Since Last Vend", 0, 90, 10, help="Dormancy check")
+
+    with col2:
+        st.markdown("### 💰 Financial Capacity")
+        median_spend = st.number_input("Median Vend Amount (₦)", min_value=0, value=5000, step=500)
+        total_vends = st.number_input("Total Lifetime Vends", min_value=1, value=15)
+        # Derived metric for scoring
+        avg_monthly = median_spend * (vends_60d / 2) if vends_60d > 0 else 0
+
+    with col3:
+        st.markdown("### ⚠️ Risk & Stability")
+        failure_rate = st.slider("Failure Rate (%)", 0.0, 1.0, 0.1, step=0.05)
+        volatility = st.slider("Volatility Score", 0.0, 2.0, 0.3, help="0.0 = Consistent, 1.0+ = Erratic")
+        unique_devices = st.number_input("Unique Devices Used", min_value=1, max_value=10, value=1)
+
+    # Build DataFrame for the Engine
+    input_data = {
+        'Meter No': [meter_id],  # Uses the custom ID now
+        'tenure_days': [tenure_days],
+        'vends_60d': [vends_60d],
+        'recency_days': [recency_days],
+        'median_vend_amount': [median_spend],
+        'total_success_vends': [total_vends],
+        'failure_rate': [failure_rate],
+        'volatility': [volatility],
+        'unique_devices': [unique_devices],
+        'avg_monthly_spend': [avg_monthly]
+    }
+    
+    sim_df = pd.DataFrame(input_data)
+
+    if st.button("Run Simulation", type="primary"):
+        # Run Scoring
+        results_df = apply_v0_rules(sim_df) # Keep full DF for export
+        result = results_df.iloc[0]         # Extract Series for display
+
         st.divider()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Selected DisCo", user_txns['Service_Provider'].iloc[0])
-        c2.metric("Recency (Days)", int(sim_data['recency_days'].iloc[0]), help="Days since last vend relative to Sim Date")
-        c3.metric("Vends (Last 60d)", int(sim_data['vends_60d'].iloc[0]))
+        st.subheader("2. Decision Dashboard")
+        
+        # --- Top Level Metrics ---
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Behavior Score", f"{result['Score']:.1f} / 100")
+        m2.metric("Risk Band", result['Band'])
+        m3.metric("Median Capacity", f"₦{median_spend:,.0f}")
 
-        st.subheader(f"2. Decision (as of {sim_date})")
+        # --- PREPARE DATA FOR VISUALIZATION ---
+        scenarios = config.SCENARIOS.keys()
+        viz_data = []
         
-        limit = result['Amount_2_Balanced_Growth']
-        decision = result['Decision_2_Balanced_Growth']
-        
-        if decision == "APPROVED":
-            st.success(f"✅ **APPROVED: ₦{limit:,.0f}**")
-            st.markdown(f"**Score:** {result['Score']} ({result['Band']})")
-        else:
-            st.error(f"❌ **DECLINED**")
-            st.markdown(f"**Reason:** {result['Reason_2_Balanced_Growth']}")
+        for sc in scenarios:
+            decision = result[f"Decision_{sc}"]
+            amount = result[f"Amount_{sc}"]
+            reason = result[f"Reason_{sc}"]
             
-            # Debugging Help
-            if "dormant" in result['Reason_2_Balanced_Growth'].lower():
-                st.caption("💡 **Tip:** This user is dormant. Try dragging the 'Time Travel' slider in the sidebar back to **February 2025**.")
-else:
-    st.error("Data not found.")
+            viz_data.append({
+                "Scenario": sc,
+                "Credit Limit": amount,
+                "Decision": decision,
+                "Reason": reason
+            })
+
+        viz_df = pd.DataFrame(viz_data)
+
+        # --- VISUALIZATION: Limit Comparison ---
+        st.subheader("3. Scenario Impact Analysis")
+        
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            # Bar Chart: Limit by Scenario
+            fig = px.bar(
+                viz_df, 
+                x="Scenario", 
+                y="Credit Limit", 
+                color="Decision",
+                text="Credit Limit",
+                title=f"Approved Credit Limit for {meter_id}",
+                color_discrete_map={"APPROVED": "#00CC96", "REJECTED": "#EF553B"},
+                labels={"Credit Limit": "Limit (₦)"}
+            )
+            fig.update_traces(texttemplate='₦%{text:,.0f}', textposition='outside')
+            fig.update_layout(yaxis_range=[0, max(20000, viz_df['Credit Limit'].max() * 1.2)]) # Add headroom
+            st.plotly_chart(fig, use_container_width=True)
+
+        with c2:
+            # Detailed Cards for each Scenario
+            st.markdown("**Scenario Breakdown**")
+            for index, row in viz_df.iterrows():
+                with st.expander(f"{row['Scenario']}", expanded=True):
+                    if row['Decision'] == "APPROVED":
+                        st.success(f"✅ **APPROVED: ₦{row['Credit Limit']:,.0f}**")
+                    else:
+                        st.error(f"❌ **REJECTED**")
+                        st.caption(f"Reason: {row['Reason']}")
+        
+        # --- NEW: Download Button ---
+        st.divider()
+        csv = results_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Simulation Result (CSV)",
+            data=csv,
+            file_name=f"sim_result_{meter_id}.csv",
+            mime="text/csv"
+        )
+
+
+# ==========================================
+# MODE 2: BATCH UPLOAD (Existing Logic)
+# ==========================================
+elif app_mode == "Batch Upload (CSV)":
+    uploaded_file = st.sidebar.file_uploader("Upload Transactions (CSV)", type=['csv'])
+
+    if uploaded_file is not None:
+        try:
+            with st.spinner('Running V0 Pipeline...'):
+                raw_df = load_and_clean_data(uploaded_file)
+                features_df = calculate_features(raw_df)
+                results_df = apply_v0_rules(features_df)
+                
+            st.success(f"Successfully processed {len(results_df)} unique meters.")
+
+            # --- METRICS & DASHBOARD ---
+            scenarios = config.SCENARIOS.keys()
+            metrics = []
+
+            for sc in scenarios:
+                decision_col = f"Decision_{sc}"
+                amount_col = f"Amount_{sc}"
+                
+                approved = results_df[results_df[decision_col] == 'APPROVED']
+                approval_rate = (len(approved) / len(results_df)) * 100 if len(results_df) > 0 else 0
+                avg_limit = approved[amount_col].mean() if not approved.empty else 0
+                total_exposure = approved[amount_col].sum()
+                
+                metrics.append({
+                    "Scenario": sc,
+                    "Approval Rate": f"{approval_rate:.1f}%",
+                    "Avg Limit": f"₦{avg_limit:,.0f}",
+                    "Total Exposure": f"₦{total_exposure:,.0f}",
+                    "Count": len(approved)
+                })
+
+            st.subheader("2. Scenario Comparison")
+            cols = st.columns(3)
+            for i, metric in enumerate(metrics):
+                with cols[i]:
+                    st.metric(label=f"{metric['Scenario']} Rate", value=metric['Approval Rate'], delta=f"{metric['Count']} Users")
+                    st.caption(f"Avg Limit: {metric['Avg Limit']}")
+                    st.caption(f"Total Exposure: {metric['Total Exposure']}")
+
+            st.subheader("3. Impact Analysis")
+            
+            # Box Plot for Limits
+            plot_data = []
+            for sc in scenarios:
+                amt_col = f"Amount_{sc}"
+                temp = results_df[results_df[amt_col] > 0][amt_col]
+                for val in temp:
+                    plot_data.append({'Scenario': sc, 'Credit Limit': val})
+            
+            if plot_data:
+                plot_df = pd.DataFrame(plot_data)
+                fig = px.box(plot_df, x="Scenario", y="Credit Limit", color="Scenario", points="all", title="Portfolio Limit Distribution")
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("4. Detailed Data")
+            st.dataframe(results_df)
+
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Results", csv, "monsera_results.csv", "text/csv")
+
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            import traceback
+            st.text(traceback.format_exc())
+    else:
+        st.info("👈 Please upload 'consolidated_transactions.csv' to begin batch analysis.")
