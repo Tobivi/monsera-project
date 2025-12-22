@@ -12,288 +12,113 @@ from src.etl.transformer import calculate_features
 from src.credit_engine.scoring import apply_v0_rules
 from src.credit_engine import config
 
-# --- PAGE CONFIG ---
-st.set_page_config(
-    page_title="Monsera V0 Credit Engine",
-    page_icon="⚡",
-    layout="wide"
-)
+st.set_page_config(page_title="Monsera V0 Engine", page_icon="⚡", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
-if 'demo_stage' not in st.session_state:
-    st.session_state.demo_stage = 'INPUT'
-if 'context' not in st.session_state:
-    st.session_state.context = {}
-
-# --- HELPER: LOAD REAL DATA FOR DEMO ---
+# --- HELPER: LOAD DATA ---
 @st.cache_data
 def load_demo_database():
-    """
-    Tries to load the consolidated_transactions.csv from the data folder 
-    to use as a 'Real User Database' for the demo.
-    """
-    # Paths to check
-    paths = [
-        "data/consolidated_transactions.csv",
-        "demo/data/consolidated_transactions.csv",
-        "../data/consolidated_transactions.csv"
-    ]
-    
+    paths = ["data/consolidated_transactions.csv", "demo/data/consolidated_transactions.csv"]
     for path in paths:
         full_path = os.path.join(os.path.dirname(__file__), path)
         if os.path.exists(full_path):
-            try:
-                df = pd.read_csv(full_path)
-                # Quick normalization for the demo
-                if "Transaction_Date" in df.columns:
-                    df['Transaction_Date'] = pd.to_datetime(df['Transaction_Date'])
-                return df
-            except Exception as e:
-                st.error(f"Error loading demo data: {e}")
-                return None
+            df = pd.read_csv(full_path)
+            if "Transaction_Date" in df.columns:
+                df['Transaction_Date'] = pd.to_datetime(df['Transaction_Date'])
+            return df
     return None
 
-# Load the DB once
 demo_db = load_demo_database()
 
-# --- HEADER ---
-st.title("⚡ Monsera V0 Credit Engine")
-st.markdown("**Behavioral Eligibility & Advance-Sizing Model**")
+# --- SIDEBAR: DATA INSPECTOR & TIME TRAVEL ---
+st.sidebar.title("🛠️ Data Inspector")
 
-# --- SIDEBAR ---
-st.sidebar.header("Configuration")
-app_mode = st.sidebar.radio("Select Interface:", ["Live Transaction Demo", "Batch Portfolio Upload"])
-st.sidebar.markdown("---")
+if demo_db is not None:
+    # 1. SHOW DISCOS FOUND
+    st.sidebar.markdown("### 🔍 DisCos Found")
+    if 'Service_Provider' in demo_db.columns:
+        discos = demo_db['Service_Provider'].value_counts()
+        st.sidebar.dataframe(discos, use_container_width=True)
+    else:
+        st.sidebar.error("No 'Service_Provider' column found.")
 
-# ==========================================
-# MODE 1: LIVE TRANSACTION DEMO
-# ==========================================
-if app_mode == "Live Transaction Demo":
+    # 2. TIME TRAVEL SLIDER (The Fix for Eligibility)
+    st.sidebar.markdown("### ⏳ Time Travel")
+    st.sidebar.info("Adjust this date to test users from past months.")
     
-    # === STAGE 1: INPUT ===
-    if st.session_state.demo_stage == 'INPUT':
-        st.subheader("1. Customer & Context")
+    min_date = demo_db['Transaction_Date'].min().date()
+    max_date = demo_db['Transaction_Date'].max().date()
+    
+    # Default to the *start* of the dataset to catch the bulk of users? 
+    # No, better to default to max, but let user slide back.
+    sim_date = st.sidebar.date_input("Simulation 'Today' Date", value=max_date, min_value=min_date, max_value=max_date)
+else:
+    st.sidebar.warning("Load data to use Inspector.")
+    sim_date = datetime.now().date()
 
-        # A. MODE SELECTION: REAL VS MANUAL
-        input_method = st.radio("Input Method:", 
-                                ["Select Existing Customer (Real Data)", "Manual Parameter Entry (Simulation)"], 
-                                horizontal=True)
+# --- MAIN APP ---
+st.title("⚡ Monsera V0 Credit Engine")
 
-        st.divider()
+# --- INPUT SECTION ---
+st.subheader("1. Select Customer")
+
+if demo_db is not None:
+    # Filter by DisCo first (To solve the "Eko Only" view)
+    all_discos = demo_db['Service_Provider'].unique().tolist()
+    selected_filter_disco = st.selectbox("Filter by DisCo", ["All"] + all_discos)
+    
+    if selected_filter_disco != "All":
+        filtered_users = demo_db[demo_db['Service_Provider'] == selected_filter_disco]['User_ID'].unique()
+    else:
+        filtered_users = demo_db['User_ID'].unique()
         
-        sim_data = None
-        history_df = None
-        selected_meter = None
-        selected_disco = "Unknown"
-
-        # --- OPTION A: REAL DATA ---
-        if input_method == "Select Existing Customer (Real Data)":
-            if demo_db is not None:
-                # Filter for valid users
-                valid_users = demo_db['User_ID'].unique()
-                selected_meter = st.selectbox("Search Customer Meter / ID", valid_users)
-                
-                # Get User Data
-                user_txns = demo_db[demo_db['User_ID'] == selected_meter].sort_values('Transaction_Date', ascending=False)
-                
-                if not user_txns.empty:
-                    # 1. Extract DisCo
-                    if 'Service_Provider' in user_txns.columns:
-                        selected_disco = user_txns['Service_Provider'].iloc[0]
-                    
-                    # 2. Extract History (Real Transactions)
-                    history_df = user_txns[['Transaction_Date', 'Amount', 'Status', 'Service_Provider']].head(5)
-                    
-                    # 3. Calculate Metrics (Real Time)
-                    # We need to map columns to what the transformer expects
-                    prep_df = user_txns.rename(columns={
-                        'User_ID': 'Meter No', 
-                        'Transaction_Date': 'Entry Date',
-                        'Access_Source': 'User Agent' # Mapping for device check
-                    })
-                    # Map status to boolean
-                    success_statuses = ['SUCCESS', 'COMPLETED', 'SUCCESSFUL']
-                    prep_df['is_successful'] = prep_df['Status'].str.upper().isin(success_statuses)
-                    
-                    # Run Transformer
-                    with st.spinner("Analyzing customer history..."):
-                        sim_data = calculate_features(prep_df)
-                        
-                    # Show Summary
-                    st.info(f"Loaded **{len(user_txns)}** transactions for **{selected_meter}**.")
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("DisCo", selected_disco)
-                    m2.metric("Tenure (Days)", int(sim_data['tenure_days'].iloc[0]))
-                    m3.metric("Last Vend", f"{int(sim_data['recency_days'].iloc[0])} days ago")
-
-            else:
-                st.warning("⚠️ `consolidated_transactions.csv` not found in /data folder. Please use Manual Entry.")
-
-        # --- OPTION B: MANUAL ENTRY ---
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                selected_meter = st.text_input("Meter No (Simulated)", "SIM_USER_001")
-                selected_disco = st.selectbox("DisCo", ["Ikeja Electric", "Eko Electricity", "Abuja Electric", "Enugu Electric"])
-            with c2:
-                # Sliders for parameters
-                tenure = st.number_input("Tenure (Days)", 90)
-                vends_60d = st.slider("Vends (Last 60d)", 0, 30, 5)
-                recency = st.slider("Days Since Last Vend", 0, 60, 5)
-            with c3:
-                spend = st.number_input("Median Vend Amount (₦)", 5000)
-                fails = st.slider("Failure Rate", 0.0, 1.0, 0.0)
-            
-            # Construct DataFrame manually
-            sim_data = pd.DataFrame({
-                'Meter No': [selected_meter],
-                'tenure_days': [tenure],
-                'vends_60d': [vends_60d],
-                'recency_days': [recency],
-                'median_vend_amount': [spend],
-                'total_success_vends': [15], # Placeholder
-                'failure_rate': [fails],
-                'volatility': [0.2], # Default
-                'unique_devices': [1],
-                'avg_monthly_spend': [spend * (vends_60d/2)]
-            })
-            st.caption("ℹ️ Note: Transaction history is not available for manual simulations.")
-
-        # --- CONTEXT FOR VEND ---
-        st.markdown("### 2. Transaction Context")
-        xc1, xc2 = st.columns(2)
-        with xc1:
-            wallet_bal = st.number_input("Current Wallet Balance (₦)", min_value=0, value=200, step=100)
-        with xc2:
-            request_amt = st.number_input("Electricity Requested (₦)", min_value=1000, value=5000, step=500)
-
-        # --- ACTION ---
-        if st.button("🚀 Check Eligibility", type="primary"):
-            if sim_data is not None:
-                st.session_state.user_persona_data = sim_data
-                st.session_state.history_df = history_df # Will be None if Manual
-                st.session_state.context = {
-                    'wallet': wallet_bal, 
-                    'request': request_amt, 
-                    'disco': selected_disco, 
-                    'meter_id': selected_meter
-                }
-                st.session_state.demo_stage = 'OFFER'
-                st.rerun()
-
-    # === STAGE 2: OFFER REVIEW ===
-    elif st.session_state.demo_stage == 'OFFER':
-        ctx = st.session_state.context
+    selected_meter = st.selectbox("Select Meter / User ID", filtered_users)
+    
+    # Process Selected User
+    user_txns = demo_db[demo_db['User_ID'] == selected_meter].sort_values('Transaction_Date', ascending=False)
+    
+    # PREPARE FOR CALCULATIONS
+    # Filter out "Future" transactions based on Time Travel Slider
+    user_txns_sim = user_txns[user_txns['Transaction_Date'] <= pd.to_datetime(sim_date)]
+    
+    if user_txns_sim.empty:
+        st.error(f"❌ This user has no transactions before {sim_date}. Try moving the date slider forward.")
+    else:
+        # Prepare DF for Transformer
+        prep_df = user_txns_sim.rename(columns={
+            'User_ID': 'Meter No', 
+            'Transaction_Date': 'Entry Date',
+            'Access_Source': 'User Agent'
+        })
+        prep_df['is_successful'] = prep_df['Status'].str.upper().isin(['SUCCESS', 'COMPLETED', 'SUCCESSFUL'])
         
-        # 1. Run Scoring
-        results_df = apply_v0_rules(st.session_state.user_persona_data)
+        # CALCULATE FEATURES (PASSING THE SIM DATE)
+        sim_data = calculate_features(prep_df, reference_date=sim_date)
+        
+        # RUN SCORING
+        results_df = apply_v0_rules(sim_data)
         result = results_df.iloc[0]
+
+        # --- DISPLAY RESULTS ---
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Selected DisCo", user_txns['Service_Provider'].iloc[0])
+        c2.metric("Recency (Days)", int(sim_data['recency_days'].iloc[0]), help="Days since last vend relative to Sim Date")
+        c3.metric("Vends (Last 60d)", int(sim_data['vends_60d'].iloc[0]))
+
+        st.subheader(f"2. Decision (as of {sim_date})")
         
         limit = result['Amount_2_Balanced_Growth']
         decision = result['Decision_2_Balanced_Growth']
         
-        # 2. Navigation
-        st.button("← New Simulation", on_click=lambda: st.session_state.update(demo_stage='INPUT'))
-        st.divider()
-
-        # 3. Customer Header
-        st.markdown(f"### 👤 Customer: `{ctx['meter_id']}`")
-        st.caption(f"Service Provider: **{ctx['disco']}**")
-
-        # 4. REAL HISTORY (Only if it exists)
-        if st.session_state.history_df is not None:
-            with st.expander("🕒 Recent Transaction History (Real Data)", expanded=False):
-                st.dataframe(st.session_state.history_df, use_container_width=True, hide_index=True)
-
-        # 5. The Decision Logic
-        total_power = ctx['wallet'] + limit
-        credit_needed = max(ctx['request'] - ctx['wallet'], 0)
-
-        # --- SCENARIO A: APPROVED & SUFFICIENT ---
-        if decision == "APPROVED" and total_power >= ctx['request']:
-            st.success("✅ **Credit Offer Available**")
-            
-            # Financial Card
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Wallet Balance", f"₦{ctx['wallet']:,}")
-            col2.metric("Credit Limit", f"₦{limit:,.0f}")
-            col3.metric("You Pay Now", f"₦{credit_needed:,.0f}", delta="Credit Advance", delta_color="inverse")
-
-            st.info(f"ℹ️ **Repayment:** The ₦{credit_needed:,.0f} credit will be automatically recovered from the next vend on {ctx['disco']}.")
-            
-            # Acceptance
-            c_yes, c_no = st.columns(2)
-            if c_yes.button("✅ Accept & Vend", type="primary", use_container_width=True):
-                st.session_state.final_result = result
-                st.session_state.credit_used = credit_needed
-                st.session_state.demo_stage = 'RESULT'
-                st.rerun()
-            if c_no.button("❌ Decline", use_container_width=True):
-                st.session_state.demo_stage = 'INPUT'
-                st.rerun()
-
-        # --- SCENARIO B: PARTIAL APPROVAL ---
-        elif decision == "APPROVED":
-            st.warning(f"⚠️ **Partial Approval**")
-            st.write(f"Customer requested **₦{ctx['request']:,}**, but only has **₦{total_power:,.0f}** purchasing power (Wallet + Limit).")
-            st.metric("Max Possible Vend", f"₦{total_power:,.0f}")
-            st.button("Back", on_click=lambda: st.session_state.update(demo_stage='INPUT'))
-
-        # --- SCENARIO C: DECLINED ---
+        if decision == "APPROVED":
+            st.success(f"✅ **APPROVED: ₦{limit:,.0f}**")
+            st.markdown(f"**Score:** {result['Score']} ({result['Band']})")
         else:
-            st.error(f"❌ **Credit Declined**")
-            st.write(f"**Reason:** {result['Reason_2_Balanced_Growth']}")
-            st.button("Back", on_click=lambda: st.session_state.update(demo_stage='INPUT'))
-
-    # === STAGE 3: RECEIPT ===
-    elif st.session_state.demo_stage == 'RESULT':
-        ctx = st.session_state.context
-        used = st.session_state.credit_used
-        res = st.session_state.final_result
-        
-        st.balloons()
-        st.success("⚡ **Vend Successful**")
-        
-        # Receipt UI
-        st.markdown("### Transaction Receipt")
-        st.markdown(f"""
-        | Field | Details |
-        | :--- | :--- |
-        | **Meter** | `{ctx['meter_id']}` |
-        | **DisCo** | {ctx['disco']} |
-        | **Total Units** | ₦{ctx['request']:,} |
-        | **Credit Used** | ₦{used:,.0f} |
-        | **Repayment Due** | Next Vend |
-        """)
-        
-        # Download
-        csv_data = pd.DataFrame([{
-            "Timestamp": datetime.now(),
-            "Meter": ctx['meter_id'],
-            "DisCo": ctx['disco'],
-            "Amount": ctx['request'],
-            "Credit_Used": used,
-            "Score": res['Score'],
-            "Band": res['Band']
-        }]).to_csv(index=False).encode('utf-8')
-        
-        st.download_button("📥 Download Receipt", csv_data, f"Receipt_{ctx['meter_id']}.csv", "text/csv")
-        st.button("Start New Transaction", on_click=lambda: st.session_state.update(demo_stage='INPUT'))
-
-# ==========================================
-# MODE 2: BATCH UPLOAD (Preserved)
-# ==========================================
-elif app_mode == "Batch Portfolio Upload":
-    st.header("📂 Bulk Portfolio Analysis")
-    uploaded_file = st.sidebar.file_uploader("Upload CSV", type=['csv'])
-    if uploaded_file:
-        try:
-            raw_df = load_and_clean_data(uploaded_file)
-            if "User_ID" in raw_df.columns: raw_df = raw_df.rename(columns={"User_ID": "Meter No"})
-            features_df = calculate_features(raw_df)
-            results_df = apply_v0_rules(features_df)
-            st.success(f"Processed {len(results_df)} records.")
-            st.dataframe(results_df.head())
-            st.download_button("📥 Download Results", results_df.to_csv(index=False).encode('utf-8'), "results.csv", "text/csv")
-        except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"❌ **DECLINED**")
+            st.markdown(f"**Reason:** {result['Reason_2_Balanced_Growth']}")
+            
+            # Debugging Help
+            if "dormant" in result['Reason_2_Balanced_Growth'].lower():
+                st.caption("💡 **Tip:** This user is dormant. Try dragging the 'Time Travel' slider in the sidebar back to **February 2025**.")
+else:
+    st.error("Data not found.")
